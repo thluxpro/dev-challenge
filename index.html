@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Flybondi - Challenge (Vanilla JS)</title>
+  <style>
+    :root{font-family:Inter,system-ui,Segoe UI,Roboto,Arial,sans-serif;color:#222}
+    body{margin:0;padding:24px;background:#f6f7fb}
+    .container{max-width:980px;margin:0 auto;background:#fff;padding:20px;border-radius:12px;box-shadow:0 6px 22px rgba(20,30,60,.08)}
+    h1{margin:0 0 12px;font-size:20px}
+    .controls{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:16px}
+    label{display:flex;flex-direction:column;font-size:13px}
+    input,select,button{padding:8px 10px;border:1px solid #d7dbe5;border-radius:8px;font-size:14px}
+    button{background:#1d4ed8;color:#fff;border:none;cursor:pointer}
+    .results{margin-top:16px}
+    .card{background:#fff;border-radius:10px;padding:12px;margin-bottom:10px;border:1px solid #eef2ff}
+    .card.best{border-color:#fde68a;box-shadow:0 4px 18px rgba(253,230,138,.14)}
+    .row{display:flex;justify-content:space-between;align-items:center}
+    .meta{font-size:13px;color:#555}
+    .small{font-size:12px;color:#777}
+    .no-results{padding:20px;text-align:center;color:#666}
+    .hint{font-size:13px;color:#666;margin-top:8px}
+    .flex{display:flex;gap:8px;align-items:center}
+    .pill{background:#eef2ff;padding:6px 8px;border-radius:999px;font-weight:600}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Flybondi - Challenge (Vanilla JS)</h1>
+    <p class="small">Busca combinaciones ida y vuelta en el dataset. El app intenta leer <code>dataset.json</code> en la misma carpeta, si no existe usa un dataset de ejemplo embebido.</p>
+
+    <div class="controls">
+      <label>
+        Origen
+        <select id="originSelect"><option value="">Cargando...</option></select>
+      </label>
+
+      <label>
+        Presupuesto máximo (ARS)
+        <input id="budget" type="number" min="0" value="800" />
+      </label>
+
+      <label>
+        Fecha mínima salida
+        <input id="dateFrom" type="date" />
+      </label>
+
+      <label>
+        Fecha máxima regreso
+        <input id="dateTo" type="date" />
+      </label>
+
+      <div style="display:flex;align-items:flex-end">
+        <button id="searchBtn">Buscar</button>
+      </div>
+    </div>
+
+    <div class="hint">Resultados: <span id="count">0</span> combinaciones encontradas. <span class="pill" id="cheapest">—</span></div>
+
+    <div class="results" id="results"></div>
+  </div>
+
+  <script>
+    // App tries to fetch dataset.json from same folder. If fails, it falls back to embedded sample.
+    const datasetUrl = './dataset.json';
+
+    // --- Embedded fallback dataset (small sample) ---
+    const fallbackDataset = [
+      { origin: 'BUE', destination: 'CORD', price: 300.0, availability: 5, date: '2025-11-01' },
+      { origin: 'CORD', destination: 'BUE', price: 280.0, availability: 3, date: '2025-11-10' },
+      { origin: 'BUE', destination: 'ROS', price: 350.0, availability: 4, date: '2025-12-05' },
+      { origin: 'ROS', destination: 'BUE', price: 340.0, availability: 4, date: '2025-12-12' },
+      { origin: 'BUE', destination: 'MDQ', price: 420.0, availability: 2, date: '2025-10-03' },
+      { origin: 'MDQ', destination: 'BUE', price: 380.0, availability: 2, date: '2025-10-06' },
+      // one-way entries to same city (different dates)
+      { origin: 'BUE', destination: 'CORD', price: 200.0, availability: 2, date: '2025-11-20' },
+      { origin: 'CORD', destination: 'BUE', price: 190.0, availability: 2, date: '2025-11-25' }
+    ];
+
+    // Utility: parse ISO date string to Date
+    function parseDate(d) { return new Date(d + 'T00:00:00'); }
+
+    // Load dataset (try fetch then fallback)
+    async function loadDataset() {
+      try {
+        const res = await fetch(datasetUrl, {cache: 'no-store'});
+        if (!res.ok) throw new Error('no dataset');
+        const json = await res.json();
+        console.log('dataset.json loaded from server, entries:', json.length);
+        return json;
+      } catch (e) {
+        console.warn('Failed to load dataset.json, using fallback sample. Error:', e.message);
+        return fallbackDataset;
+      }
+    }
+
+    // Find all unique origins in dataset
+    function getOrigins(data) {
+      const set = new Set(data.map(r => r.origin));
+      return [...set].sort();
+    }
+
+    // Core search: look for pairs (outbound, inbound) that form a round-trip
+    // outbound.origin === selectedOrigin
+    // outbound.destination === inbound.origin
+    // inbound.destination === selectedOrigin
+    // outbound.date < inbound.date (strict)
+    // totalPrice = outbound.price + inbound.price <= budget
+    function findRoundTrips(data, selectedOrigin, budget, minDate, maxReturnDate) {
+      const outbound = data.filter(r => r.origin === selectedOrigin);
+      const inbound = data.filter(r => r.destination === selectedOrigin);
+
+      const results = [];
+
+      // index inbound by origin city for faster lookup
+      const inboundByOrigin = inbound.reduce((acc, r) => {
+        acc[r.origin] = acc[r.origin] || [];
+        acc[r.origin].push(r);
+        return acc;
+      }, {});
+
+      for (const o of outbound) {
+        const possibleInbounds = inboundByOrigin[o.destination] || [];
+        for (const i of possibleInbounds) {
+          const dOut = parseDate(o.date);
+          const dIn = parseDate(i.date);
+          if (dOut >= dIn) continue; // must return after outbound
+
+          if (minDate && dOut < parseDate(minDate)) continue;
+          if (maxReturnDate && dIn > parseDate(maxReturnDate)) continue;
+
+          const total = Number(o.price) + Number(i.price);
+          if (total > budget) continue;
+
+          // available seats is min of the two availability numbers
+          const seats = Math.min(o.availability || 0, i.availability || 0);
+
+          results.push({
+            origin: selectedOrigin,
+            destination: o.destination,
+            outbound: o,
+            inbound: i,
+            totalPrice: total,
+            seats,
+            days: Math.round((dIn - dOut) / (1000*60*60*24))
+          });
+        }
+      }
+
+      // sort cheapest first
+      results.sort((a,b) => a.totalPrice - b.totalPrice || a.days - b.days);
+      return results;
+    }
+
+    // Render helpers
+    function renderResults(items) {
+      const container = document.getElementById('results');
+      container.innerHTML = '';
+      document.getElementById('count').textContent = items.length;
+      if (items.length === 0) {
+        container.innerHTML = '<div class="no-results">No se encontraron combinaciones con los parámetros indicados.</div>';
+        document.getElementById('cheapest').textContent = '—';
+        return;
+      }
+
+      // annotate cheapest
+      const cheapest = items[0];
+      document.getElementById('cheapest').textContent = `Mejor: ${cheapest.destination} $${cheapest.totalPrice.toFixed(2)}`;
+
+      items.forEach((it, idx) => {
+        const el = document.createElement('div');
+        el.className = 'card' + (idx === 0 ? ' best' : '');
+        el.innerHTML = `
+          <div class="row">
+            <div>
+              <strong>${it.destination}</strong>
+              <div class="meta">${it.origin} → ${it.destination} — ${it.outbound.date} / ${it.inbound.date} (noche(s): ${it.days})</div>
+            </div>
+            <div style="text-align:right">
+              <div style="font-weight:700;font-size:16px">$ ${it.totalPrice.toFixed(2)}</div>
+              <div class="small">asientos disponibles: ${it.seats}</div>
+            </div>
+          </div>
+          <div class="small" style="margin-top:8px">Ida: ${it.outbound.origin} → ${it.outbound.destination} • $${Number(it.outbound.price).toFixed(2)} • ${it.outbound.availability} disponibles</div>
+          <div class="small">Vuelta: ${it.inbound.origin} → ${it.inbound.destination} • $${Number(it.inbound.price).toFixed(2)} • ${it.inbound.availability} disponibles</div>
+        `;
+        container.appendChild(el);
+      });
+    }
+
+    // Boot
+    (async function() {
+      const data = await loadDataset();
+
+      // ensure dates are in YYYY-MM-DD; if not, we leave as-is
+
+      // populate origins
+      const origins = getOrigins(data);
+      const originSelect = document.getElementById('originSelect');
+      originSelect.innerHTML = '<option value="">-- elegir origen --</option>' + origins.map(o => `<option value="${o}">${o}</option>`).join('');
+
+      // default origin to first if available
+      if (origins.length) originSelect.value = origins[0];
+
+      const searchBtn = document.getElementById('searchBtn');
+      searchBtn.addEventListener('click', () => {
+        const origin = originSelect.value;
+        const budget = Number(document.getElementById('budget').value) || 0;
+        const dateFrom = document.getElementById('dateFrom').value || null;
+        const dateTo = document.getElementById('dateTo').value || null;
+
+        if (!origin) return alert('Por favor, seleccioná un origen.');
+
+        const results = findRoundTrips(data, origin, budget, dateFrom, dateTo);
+        renderResults(results);
+      });
+
+      // Do an initial search with defaults
+      document.getElementById('searchBtn').click();
+    })();
+  </script>
+</body>
+</html>
